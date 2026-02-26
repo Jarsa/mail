@@ -44,6 +44,15 @@ class TestMailgun(BaseCommon):
         tracking_email = self.env["mail.tracking.email"].search(
             [("mail_id", "=", mail.id)]
         )
+        if not tracking_email:
+            # In test mode, mail._send() returns early (IrMailServer._disable_send()),
+            # so _prepare_outgoing_list is never called and tracking emails are not
+            # automatically created. Create the tracking email manually.
+            tracking_email = (
+                self.env["mail.tracking.email"]
+                .sudo()
+                .create(mail._tracking_email_prepare({"email_to": [self.recipient]}))
+            )
         return mail, tracking_email
 
     @classmethod
