@@ -916,36 +916,45 @@ class TestMailTracking(TransactionCase, MockSmtplibCase):
         )
 
     def test_tracking_img_tag(self):
-        # As the img tag is not in the body of the returned mail.mail record,
-        # we have to intercept the IrMailServer.send_email method here to get
-        # the real outgoing mail body and check for the img tag with a
-        # side_effect function:
-        def assert_tracking_tag_side_effect(*args, **kwargs):
-            mail = args[0]
-            msg = "data-odoo-tracking-email not found"
-            if "data-odoo-tracking-email=" in mail.as_string():
-                msg = "data-odoo-tracking-email found"
-            raise AssertionError(msg)
+        mail_server = self.env["ir.mail_server"].create(
+            {
+                "name": "Tracking image SMTP",
+                "smtp_host": "smtp.tracking.test",
+            }
+        )
+        _mail, tracking = self.mail_send(self.recipient.email)
+        body = f"<div>Body</div>{tracking._get_mail_tracking_img()}"
 
-        with patch(mock_send_email) as mock_func:
-            mock_func.side_effect = assert_tracking_tag_side_effect
-            self.env["ir.config_parameter"].set_param(
-                "mail_tracking.tracking_img_disabled", False
-            )
-            mail, tracking = self.mail_send(self.recipient.email)
-            self.assertEqual(
-                "data-odoo-tracking-email found", tracking.error_description
-            )
+        def _html_body(email_message):
+            html_part = email_message.get_body(preferencelist=("html",))
+            self.assertTrue(html_part)
+            return html_part.get_content()
 
-            # now we change the system parameter "mail_tracking.img.disable"
-            # to True and check that the img tag is not in the outgoing mail
-            self.env["ir.config_parameter"].set_param(
-                "mail_tracking.tracking_img_disabled", True
-            )
-            mail, tracking = self.mail_send(self.recipient.email)
-            self.assertEqual(
-                "data-odoo-tracking-email not found", tracking.error_description
-            )
+        self.env["ir.config_parameter"].set_param(
+            "mail_tracking.tracking_img_disabled", False
+        )
+        message = mail_server._build_email__(
+            email_from="from@example.com",
+            email_to="to@example.com",
+            subject="Tracking enabled",
+            body=body,
+            subtype="html",
+        )
+        self.assertEqual(message["X-Odoo-MailTracking-ID"], str(tracking.id))
+        self.assertIn("data-odoo-tracking-email", _html_body(message))
+
+        self.env["ir.config_parameter"].set_param(
+            "mail_tracking.tracking_img_disabled", True
+        )
+        message = mail_server._build_email__(
+            email_from="from@example.com",
+            email_to="to@example.com",
+            subject="Tracking disabled",
+            body=body,
+            subtype="html",
+        )
+        self.assertEqual(message["X-Odoo-MailTracking-ID"], str(tracking.id))
+        self.assertNotIn("data-odoo-tracking-email", _html_body(message))
 
     def test_search_is_failed_message(self):
         user_employee_1 = mail_new_test_user(
@@ -1010,6 +1019,253 @@ class TestMailTracking(TransactionCase, MockSmtplibCase):
                     ("is_failed_message", "=", True),
                 ]
             )
+        )
+
+    def test_ir_mail_server_internal_helpers(self):
+        mail_server = self.env["ir.mail_server"].create(
+            {
+                "name": "Coverage SMTP",
+                "smtp_host": "smtp.coverage.test",
+            }
+        )
+        self.assertEqual(
+            mail_server._smtp_server_get(mail_server.id, False),
+            "smtp.coverage.test",
+        )
+
+        _mail, tracking = self.mail_send(self.recipient.email)
+        tracking_tag = (
+            f'<img src="https://example.com/blank.gif" '
+            f'data-odoo-tracking-email="{tracking.id}"/>'
+        )
+        body = f"<div>Body</div>{tracking_tag}"
+        self.assertNotIn(
+            "data-odoo-tracking-email",
+            mail_server._tracking_img_remove(body),
+        )
+
+        self.env["ir.config_parameter"].sudo().set_param(
+            "mail_tracking.tracking_img_disabled", True
+        )
+        built_message = mail_server._build_email__(
+            email_from="from@example.com",
+            email_to="to@example.com",
+            subject="Coverage",
+            body=body,
+            subtype="html",
+        )
+        self.assertEqual(
+            built_message["X-Odoo-MailTracking-ID"],
+            str(tracking.id),
+        )
+        self.assertNotIn("data-odoo-tracking-email", built_message.as_string())
+
+    def test_get_failed_messsage_info(self):
+        message = self.env["mail.message"].create(
+            {
+                "subject": "Coverage Message",
+                "author_id": self.sender.id,
+                "email_from": self.sender.email,
+                "message_type": "comment",
+                "model": "res.partner",
+                "res_id": self.recipient.id,
+                "subtype_id": self.env.ref("mail.mt_comment").id,
+                "body": "<p>Coverage body</p>",
+            }
+        )
+        tracking = self.env["mail.tracking.email"].create(
+            {
+                "mail_message_id": message.id,
+                "partner_id": self.recipient.id,
+                "recipient": self.recipient.email,
+                "sender": self.sender.email,
+            }
+        )
+        tracking.write({"state": "error"})
+
+        values = self.env["mail.message"].get_failed_messsage_info(
+            self.recipient.id,
+            "res.partner",
+        )
+        self.assertTrue(values)
+        self.assertEqual(values[0]["id"], message.id)
+
+    def test_mail_tracking_email_helper_branches(self):
+        message_with_subtype = self.env["mail.message"].create(
+            {
+                "subject": "Coverage Message Subtype",
+                "author_id": self.sender.id,
+                "email_from": self.sender.email,
+                "message_type": "comment",
+                "model": "res.partner",
+                "res_id": self.recipient.id,
+                "subtype_id": self.env.ref("mail.mt_comment").id,
+                "body": "<p>Coverage body</p>",
+            }
+        )
+        tracking_with_subtype = self.env["mail.tracking.email"].create(
+            {
+                "mail_message_id": message_with_subtype.id,
+                "partner_id": self.recipient.id,
+                "recipient": self.recipient.email,
+                "sender": self.sender.email,
+            }
+        )
+        self.assertEqual(
+            tracking_with_subtype.message_id,
+            message_with_subtype.message_id,
+        )
+
+        tracking_with_subtype.sudo().write({"token": False})
+        tracking_image = tracking_with_subtype._get_mail_tracking_img()
+        self.assertIn(
+            (
+                f"mail/tracking/open/{self.env.cr.dbname}/"
+                f"{tracking_with_subtype.id}/blank.gif"
+            ),
+            tracking_image,
+        )
+
+        self.assertFalse(tracking_with_subtype._event_prepare("unknown_event", {}))
+        with patch.object(
+            type(message_with_subtype),
+            "write",
+            autospec=True,
+            return_value=True,
+        ) as mock_write:
+            tracking_with_subtype._message_partners_check({}, "message-id-1")
+        self.assertIn("notified_partner_ids", mock_write.call_args.args[1])
+
+        message_without_subtype = self.env["mail.message"].create(
+            {
+                "subject": "Coverage Message No Subtype",
+                "author_id": self.sender.id,
+                "email_from": self.sender.email,
+                "message_type": "email",
+                "model": "res.partner",
+                "res_id": self.recipient.id,
+                "subtype_id": False,
+                "body": "<p>Coverage body</p>",
+            }
+        )
+        message_without_subtype.sudo().write({"subtype_id": False})
+        self.assertFalse(message_without_subtype.subtype_id)
+        tracking_without_subtype = self.env["mail.tracking.email"].create(
+            {
+                "mail_message_id": message_without_subtype.id,
+                "partner_id": self.recipient.id,
+                "recipient": self.recipient.email,
+                "sender": self.sender.email,
+            }
+        )
+        with patch.object(
+            type(message_without_subtype),
+            "write",
+            autospec=True,
+            return_value=True,
+        ) as mock_write:
+            tracking_without_subtype._message_partners_check({}, "message-id-2")
+        self.assertIn("partner_ids", mock_write.call_args.args[1])
+
+        _mail, tracking_with_mail = self.mail_send(self.recipient.email)
+        admin_user = self.env.ref("base.user_admin")
+        allowed_ids = (
+            self.env["mail.tracking.email"]
+            .with_user(admin_user)
+            ._get_allowed_ids([tracking_with_mail.id])
+        )
+        self.assertIn(tracking_with_mail.id, allowed_ids)
+
+    def test_mail_tracking_email_access_helpers(self):
+        _mail, tracking = self.mail_send(self.recipient.email)
+
+        with patch.object(
+            type(tracking),
+            "_get_allowed_ids",
+            return_value=tracking.ids,
+        ):
+            self.assertFalse(tracking._get_forbidden_access())
+
+        with patch.object(type(tracking), "_get_allowed_ids", return_value=[]):
+            forbidden = tracking._get_forbidden_access()
+        self.assertEqual(forbidden, tracking)
+
+        def passthrough():
+            return None
+
+        with (
+            patch(
+                "odoo.orm.models.Model._check_access",
+                return_value=(self.env["mail.tracking.email"], passthrough),
+            ),
+            patch.object(
+                type(tracking),
+                "_get_forbidden_access",
+                return_value=tracking,
+            ),
+        ):
+            result = tracking._check_access("read")
+        self.assertEqual(result[0], tracking)
+        self.assertIs(result[1], passthrough)
+
+        with patch("odoo.orm.models.Model._check_access", return_value=None):
+            self.assertIsNone(self.env["mail.tracking.email"]._check_access("read"))
+
+        with (
+            patch("odoo.orm.models.Model._check_access", return_value=None),
+            patch.object(
+                type(tracking),
+                "_get_forbidden_access",
+                return_value=tracking,
+            ),
+        ):
+            result = tracking._check_access("read")
+        self.assertEqual(result[0], tracking)
+        self.assertIsInstance(result[1](), AccessError)
+
+        with patch.object(
+            type(tracking),
+            "check_access",
+            autospec=True,
+        ) as mock_check_access:
+            tracking.read(["id"])
+        self.assertGreaterEqual(mock_check_access.call_count, 1)
+        mock_check_access.assert_any_call(tracking, "read")
+
+    def test_mail_tracking_event_and_gc_edge_cases(self):
+        _mail, tracking = self.mail_send(self.recipient.email)
+
+        event = self.env["mail.tracking.event"].create(
+            {
+                "tracking_email_id": tracking.id,
+                "event_type": "open",
+                "timestamp": time.time(),
+            }
+        )
+        self.assertFalse(event.recipient_address)
+
+        vals = self.env["mail.tracking.event"].process_sent(tracking, {})
+        self.assertEqual(vals["event_type"], "sent")
+        self.assertEqual(vals["tracking_email_id"], tracking.id)
+
+        self.env["ir.config_parameter"].sudo().set_param(
+            "mail_tracking.mail_tracking_email_max_age_days", "not-an-integer"
+        )
+        self.assertFalse(
+            self.env["mail.tracking.email"]._gc_mail_tracking_email(limit=1)
+        )
+
+    def test_tracking_count_hidden_for_non_system_user(self):
+        user_employee = mail_new_test_user(
+            self.env,
+            groups="base.group_user",
+            login="coverage-employee",
+            name="Coverage employee",
+        )
+        self.mail_send(self.recipient.email)
+        self.assertEqual(
+            self.recipient.with_user(user_employee).tracking_emails_count,
+            0,
         )
 
 
