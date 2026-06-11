@@ -19,7 +19,7 @@ from ..controllers.main import MailTrackingController
 
 # HACK https://github.com/odoo/odoo/pull/78424 because website is not dependency
 try:
-    from odoo.addons.website.tools import MockRequest
+    from odoo.addons.http_routing.tests.common import MockRequest
 except ImportError:
     MockRequest = None
 
