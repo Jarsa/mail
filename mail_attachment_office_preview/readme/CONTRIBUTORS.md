@@ -1,0 +1,2 @@
+- Jesús Alan Ramos Rodríguez \<<alan.ramos@jarsa.com>\>
+- Hector Meraz \<<hector.meraz@jarsa.com>\>
